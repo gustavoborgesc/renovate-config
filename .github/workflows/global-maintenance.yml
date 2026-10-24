@@ -60,8 +60,8 @@ jobs:
               fi
             fi
 
-            # 4. Faz merge nos PRs abertos do Renovate
-            gh pr list --repo "$repo" --state open --json number,title,author --jq '.[] | select(.author.login == "renovate[bot]" or .title == "Configure Renovate") | .number' 2>/dev/null | while read -r pr_number; do
+            # 4. Faz merge nos PRs abertos do Renovate E do Dependabot
+            gh pr list --repo "$repo" --state open --json number,title,author --jq '.[] | select(.author.login == "renovate[bot]" or .author.login == "dependabot[bot]" or .title == "Configure Renovate") | .number' 2>/dev/null | while read -r pr_number; do
               if [ -n "$pr_number" ]; then
                 echo "  🔄 Fazendo merge no PR #$pr_number..."
                 gh pr merge "$pr_number" --repo "$repo" --merge --admin --delete-branch >/dev/null 2>&1 || \
