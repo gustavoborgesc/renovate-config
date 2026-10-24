@@ -1,0 +1,44 @@
+name: Global Repo Maintenance (Renovate & Node 24.x)
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Roda toda segunda-feira às 06:00 UTC
+  workflow_dispatch: # Permite clicar em "Run workflow" manualmente
+
+jobs:
+  maintain-repos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configurar e atualizar todos os repositórios
+        env:
+          GH_TOKEN: ${{ secrets.PAT_GLOBAL }}
+        run: |
+          gh repo list --limit 100 --no-archived --source --json nameWithOwner,defaultBranchRef --jq '.[] | "\(.nameWithOwner) \(.defaultBranchRef.name)"' | while read -r repo branch; do
+            if [ "$repo" = "gustavoborgesc/renovate-config" ]; then continue; fi
+            echo "Processando $repo ($branch)..."
+
+            # Habilita auto-merge no repo
+            gh api --method PATCH "/repos/$repo" -f allow_auto_merge=true --silent || true
+
+            # Atualiza package.json para Node 24.x se existir e ainda não for 24.x
+            PKG_JSON_DATA=$(gh api "/repos/$repo/contents/package.json" 2>/dev/null || true)
+            if [ -n "$PKG_JSON_DATA" ]; then
+              CURRENT_NODE=$(echo "$PKG_JSON_DATA" | jq -r '.content' | base64 -d | jq -r '.engines.node // empty')
+              if [ "$CURRENT_NODE" != "24.x" ]; then
+                PKG_SHA=$(echo "$PKG_JSON_DATA" | jq -r '.sha')
+                NEW_PKG_CONTENT=$(echo "$PKG_JSON_DATA" | jq -r '.content' | base64 -d | jq '.engines.node = "24.x"' | base64 -w 0)
+                gh api --method PUT "/repos/$repo/contents/package.json" \
+                  -f message="chore: upgrade Node.js engine to 24.x" \
+                  -f content="$NEW_PKG_CONTENT" \
+                  -f sha="$PKG_SHA" \
+                  -f branch="$branch" --silent || true
+              fi
+            fi
+
+            # Faz merge nos PRs abertos do Renovate
+            gh pr list --repo "$repo" --state open --json number,title,author --jq '.[] | select(.author.login == "renovate[bot]" or .title == "Configure Renovate") | .number' | while read -r pr_number; do
+              if [ -n "$pr_number" ]; then
+                gh pr merge "$pr_number" --repo "$repo" --merge --delete-branch || true
+              fi
+            done
+          done
