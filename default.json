@@ -29,7 +29,7 @@
         "minor",
         "patch",
         "pin",
-        " pinDigest",
+        "pinDigest",
         "digest",
         "lockFileMaintenance",
         "rollback",
