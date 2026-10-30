@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Abre PRs para apontar outros repositórios ao preset central do Renovate.
 # Não escreve na branch padrão, não faz merge e não altera engines.node.
+# Os tetos abaixo espelham o preset: no máximo 2 PRs novos por hora,
+# 3 PRs abertos e 3 branches. Sem isso, uma execução abre um PR por
+# repositório e enche a fila de builds da Vercel.
 set -uo pipefail
 
 export GH_PROMPT_DISABLED=1
@@ -9,6 +12,9 @@ export GH_NO_UPDATE_NOTIFIER=1
 HEAD_BRANCH="chore-renovate-central-config"
 PRESET="github>gustavoborgesc/renovate-config"
 LIST_LIMIT=1000
+PR_CONCURRENT_LIMIT=3
+PR_HOURLY_LIMIT=2
+BRANCH_CONCURRENT_LIMIT=3
 
 if [[ -z "${GH_TOKEN:-}" ]]; then
   echo "erro: GH_TOKEN ausente. O workflow espera o secret PAT_GLOBAL." >&2
@@ -84,7 +90,7 @@ ensure_feature_branch() {
 
   assert_feature_branch "$default_branch" || return 1
 
-  if run_gh api "/repos/${repo}/git/ref/heads/${HEAD_BRANCH}" >/dev/null; then
+  if run_gh api "/repos/${repo}/git/ref/heads/${HEAD_BRANCH}" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -115,6 +121,54 @@ write_feature_branch_file() {
     args+=(-f "sha=${file_sha}")
   fi
   run_gh "${args[@]}" >/dev/null
+}
+
+OPEN_PRS=0
+FEATURE_BRANCHES=0
+CREATED_THIS_RUN=0
+CREATED_THIS_HOUR=0
+HOUR_PREFIX="$(date -u +%Y-%m-%dT%H)"
+
+repo_in_scope() {
+  local repo="$1"
+  local default_branch="$2"
+  [[ "$repo" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || return 1
+  [[ -n "$default_branch" && "$default_branch" != *$'\t'* && "$default_branch" != *" "* ]] || return 1
+  [[ "${repo,,}" != "${SELF_REPO,,}" ]] || return 1
+  return 0
+}
+
+pr_limit_reason() {
+  local used
+  if [[ "$OPEN_PRS" -ge "$PR_CONCURRENT_LIMIT" ]]; then
+    printf 'prConcurrentLimit %s (abertos: %s)' "$PR_CONCURRENT_LIMIT" "$OPEN_PRS"
+    return 0
+  fi
+  used=$((CREATED_THIS_HOUR + CREATED_THIS_RUN))
+  if [[ "$used" -ge "$PR_HOURLY_LIMIT" ]]; then
+    printf 'prHourlyLimit %s (nesta hora: %s)' "$PR_HOURLY_LIMIT" "$used"
+    return 0
+  fi
+  return 1
+}
+
+inventory_repo() {
+  local repo="$1"
+  local default_branch="$2"
+  local owner json open_count hour_count
+
+  repo_in_scope "$repo" "$default_branch" || return 0
+
+  if run_gh api "/repos/${repo}/git/ref/heads/${HEAD_BRANCH}" >/dev/null 2>&1; then
+    FEATURE_BRANCHES=$((FEATURE_BRANCHES + 1))
+  fi
+
+  owner="${repo%%/*}"
+  json="$(run_gh pr list --repo "$repo" --state open --base "$default_branch" --head "${owner}:${HEAD_BRANCH}" --json number,createdAt)" || return 1
+  open_count="$(printf '%s' "$json" | jq -r 'length')" || return 1
+  hour_count="$(printf '%s' "$json" | jq -r --arg hour "$HOUR_PREFIX" '[.[] | select((.createdAt // "") | startswith($hour))] | length')" || return 1
+  OPEN_PRS=$((OPEN_PRS + open_count))
+  CREATED_THIS_HOUR=$((CREATED_THIS_HOUR + hour_count))
 }
 
 process_repo() {
@@ -157,7 +211,23 @@ process_repo() {
     return 0
   fi
 
-  ensure_feature_branch "$repo" "$default_branch" || return 1
+  local had_branch=0 reason
+  if run_gh api "/repos/${repo}/git/ref/heads/${HEAD_BRANCH}" >/dev/null 2>&1; then
+    had_branch=1
+  fi
+
+  if [[ "$had_branch" -eq 0 ]]; then
+    if reason="$(pr_limit_reason)"; then
+      log "  limite de PRs atingido (${reason}). Não crio branch nem PR."
+      return 0
+    fi
+    if [[ "$FEATURE_BRANCHES" -ge "$BRANCH_CONCURRENT_LIMIT" ]]; then
+      log "  limite de branches atingido (branchConcurrentLimit ${BRANCH_CONCURRENT_LIMIT}). Não crio ${HEAD_BRANCH}."
+      return 0
+    fi
+    ensure_feature_branch "$repo" "$default_branch" || return 1
+    FEATURE_BRANCHES=$((FEATURE_BRANCHES + 1))
+  fi
 
   payload=""
   canon=""
@@ -181,12 +251,19 @@ process_repo() {
     return 0
   fi
 
+  if reason="$(pr_limit_reason)"; then
+    log "  limite de PRs atingido (${reason}). A branch fica sem PR novo nesta execução."
+    return 0
+  fi
+
   run_gh pr create \
     --repo "$repo" \
     --base "$default_branch" \
     --head "$HEAD_BRANCH" \
     --title "chore: apontar o Renovate para o preset central" \
     --body-file "$BODY_FILE" >/dev/null || return 1
+  OPEN_PRS=$((OPEN_PRS + 1))
+  CREATED_THIS_RUN=$((CREATED_THIS_RUN + 1))
   log "  PR aberto contra ${default_branch}."
 }
 
@@ -210,6 +287,23 @@ main() {
   if [[ "$count" -eq "$LIST_LIMIT" ]]; then
     warn "a lista atingiu ${LIST_LIMIT} repositórios; o restante não entra nesta execução"
   fi
+
+  if [[ -n "$list" ]]; then
+    while IFS=$'\t' read -r repo default_branch; do
+      [[ -z "$repo" ]] && continue
+      if ! inventory_repo "$repo" "$default_branch"; then
+        failures=$((failures + 1))
+        err "falha ao inventariar ${repo}"
+      fi
+    done <<<"$list"
+  fi
+
+  if [[ "$failures" -gt 0 ]]; then
+    err "${failures} repositório(s) falharam no inventário"
+    exit 1
+  fi
+
+  log "Inventário: ${OPEN_PRS} PR(s) aberto(s), ${FEATURE_BRANCHES} branch(es) ${HEAD_BRANCH}, ${CREATED_THIS_HOUR} nesta hora UTC."
 
   if [[ -n "$list" ]]; then
     while IFS=$'\t' read -r repo default_branch; do

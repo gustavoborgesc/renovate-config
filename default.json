@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Automerge só de patch e de minor estável, e só depois que todos os status checks passarem (incluindo o check da Vercel). Major abre PR para revisão.",
+  "description": "No máximo 2 PRs novos por hora e 3 abertos por repositório. Minor e patch vão num único PR. Automerge só de patch e de minor estável, via PR, e só com status checks verdes (preview da Vercel). Sem check, não faz merge. Major só abre com aprovação no Dependency Dashboard. Alerta de segurança fica fora da janela semanal.",
   "extends": [
     "config:recommended",
     ":dependencyDashboard",
@@ -9,30 +9,41 @@
     ":automergeRequireAllStatusChecks"
   ],
   "timezone": "America/Sao_Paulo",
-  "schedule": ["at any time"],
-  "prHourlyLimit": 0,
-  "prConcurrentLimit": 0,
-  "branchConcurrentLimit": 0,
+  "schedule": ["before 6am on monday"],
+  "automergeSchedule": ["at any time"],
+  "prHourlyLimit": 2,
+  "prConcurrentLimit": 3,
+  "branchConcurrentLimit": 3,
+  "separateMajorMinor": true,
+  "separateMinorPatch": false,
   "rangeStrategy": "bump",
+  "rollbackPrs": false,
   "automerge": false,
   "automergeType": "pr",
   "platformAutomerge": false,
   "ignoreTests": false,
+  "internalChecksAsSuccess": false,
+  "vulnerabilityAlerts": {
+    "schedule": ["at any time"],
+    "dependencyDashboardApproval": false
+  },
   "lockFileMaintenance": {
     "enabled": true,
     "automerge": false,
     "automergeType": "pr",
     "platformAutomerge": false,
-    "schedule": ["before 5am on Monday"]
+    "ignoreTests": false,
+    "schedule": ["before 6am on monday"]
   },
   "packageRules": [
     {
-      "description": "Patch, inclusive de pacote 0.x, só entra por PR e só é mergeado quando todos os status checks já passaram. platformAutomerge fica desligado: o auto-merge nativo do GitHub dispara na abertura do PR e só espera check obrigatório da ruleset, então o status da Vercel (muitas vezes não obrigatório) seria ignorado.",
+      "description": "Patch, inclusive de pacote 0.x, só entra por PR e só é mergeado quando todos os status checks já passaram. platformAutomerge fica desligado: o auto-merge nativo do GitHub dispara na abertura do PR e só espera check obrigatório da ruleset, então o status da Vercel (muitas vezes não obrigatório) seria ignorado. ignoreTests false e internalChecksAsSuccess false: lista vazia de checks fica pendente, e um check interno do Renovate não conta como verde.",
       "matchUpdateTypes": ["patch"],
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": false,
-      "ignoreTests": false
+      "ignoreTests": false,
+      "internalChecksAsSuccess": false
     },
     {
       "description": "Minor de pacote estável (1.0.0 ou maior) segue a mesma regra do patch.",
@@ -41,7 +52,8 @@
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": false,
-      "ignoreTests": false
+      "ignoreTests": false,
+      "internalChecksAsSuccess": false
     },
     {
       "description": "Minor 0.x pode quebrar, segundo o SemVer. O PR abre e fica para revisão.",
@@ -53,7 +65,7 @@
       "ignoreTests": false
     },
     {
-      "description": "Major, pin, digest, rollback, bump, replacement e manutenção de lockfile abrem PR e não fazem automerge. Lockfile pode puxar dependência transitiva incompatível mesmo sem mudar o package.json.",
+      "description": "Major, pin, digest, rollback, bump, replacement e manutenção de lockfile abrem PR e não fazem automerge. Lockfile pode puxar dependência transitiva incompatível mesmo sem mudar o package.json. rollbackPrs na raiz já impede propor versão menor que a atual.",
       "matchUpdateTypes": [
         "major",
         "pin",
@@ -68,6 +80,27 @@
       "automergeType": "pr",
       "platformAutomerge": false,
       "ignoreTests": false
+    },
+    {
+      "description": "Equivalente ao preset group:allNonMajor. Minor e patch de todos os pacotes entram num único PR por repositório. O automerge desse PR só liga se cada item tiver automerge; um minor 0.x segura o grupo.",
+      "matchPackageNames": ["*"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "dependências não-major",
+      "groupSlug": "dependencias-nao-major"
+    },
+    {
+      "description": "Major fica de fora do grupo não-major e só abre depois de aprovação no Dependency Dashboard.",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true,
+      "automerge": false,
+      "automergeType": "pr",
+      "platformAutomerge": false,
+      "ignoreTests": false
+    },
+    {
+      "description": "pnpm.overrides, overrides e resolutions não são pacotes. Uma chave como minimatch@<3.1.4 era tratada como dependência e o PR quebrava o build.",
+      "matchDepTypes": ["pnpm.overrides", "overrides", "resolutions"],
+      "enabled": false
     }
   ]
 }
