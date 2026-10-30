@@ -27,6 +27,8 @@ jobs:
       - name: Checkout deste repositório
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # O script aplica o mesmo teto do preset: 2 PRs novos por hora,
+      # 3 PRs abertos e 3 branches. Não escreve na branch padrão.
       - name: Abrir PRs com o preset central do Renovate
         env:
           GH_TOKEN: ${{ secrets.PAT_GLOBAL }}

@@ -91,7 +91,11 @@ if [[ "${args[0]}" == "pr" && "${args[1]}" == "list" ]]; then
   if [[ "$state" == "closed" && -f "$MOCK_DIR/closed_$key" ]]; then
     printf '%s\n' '[{"number":41}]'
   elif [[ "$state" == "open" && -f "$MOCK_DIR/open_$key" ]]; then
-    printf '%s\n' '[{"number":7}]'
+    created="2020-01-01T00:00:00Z"
+    if [[ -f "$MOCK_DIR/created_$key" ]]; then
+      created="$(cat "$MOCK_DIR/created_$key")"
+    fi
+    printf '[{"number":7,"createdAt":"%s"}]\n' "$created"
   else
     printf '%s\n' '[]'
   fi
@@ -260,6 +264,32 @@ jq -e '
   [.. | objects | select((.matchUpdateTypes // []) | index("major")) | select(.automerge != false)] | length == 0
 ' "$ROOT/default.json" >/dev/null || fail "major não está com automerge false"
 
+jq -e '
+  .prConcurrentLimit == 3 and .prHourlyLimit == 2 and .branchConcurrentLimit == 3
+  and .rollbackPrs == false
+  and .ignoreTests == false
+  and .internalChecksAsSuccess == false
+  and .platformAutomerge == false
+  and .automergeType == "pr"
+  and .separateMinorPatch == false
+  and .separateMajorMinor == true
+  and .schedule == ["before 6am on monday"]
+  and .automergeSchedule == ["at any time"]
+  and .vulnerabilityAlerts.schedule == ["at any time"]
+  and .vulnerabilityAlerts.dependencyDashboardApproval == false
+  and .lockFileMaintenance.schedule == ["before 6am on monday"]
+  and .lockFileMaintenance.automerge == false
+  and ([.packageRules[] | select(.groupName == "dependências não-major") | .matchUpdateTypes] == [["minor", "patch"]])
+  and ([.packageRules[] | select(.dependencyDashboardApproval == true) | .matchUpdateTypes] == [["major"]])
+  and ([.packageRules[] | select(.enabled == false) | .matchDepTypes] == [["pnpm.overrides", "overrides", "resolutions"]])
+' "$ROOT/default.json" >/dev/null || fail "preset não tem os limites, o grupo, o schedule ou o bloqueio de overrides"
+
+if ! grep -q 'PR_CONCURRENT_LIMIT=3' "$SCRIPT" \
+  || ! grep -q 'PR_HOURLY_LIMIT=2' "$SCRIPT" \
+  || ! grep -q 'BRANCH_CONCURRENT_LIMIT=3' "$SCRIPT"; then
+  fail "o script que abre PRs fora do Renovate não tem o mesmo teto"
+fi
+
 new_case "já configurado"
 write_repos '[{"nameWithOwner":"acme/ok","defaultBranchRef":{"name":"main"}},{"nameWithOwner":"gustavoborgesc/renovate-config","defaultBranchRef":{"name":"main"}}]'
 write_file_on "acme/ok" "main" "$desired"
@@ -333,5 +363,72 @@ grep -q "coincidiria com a branch padrão" "$CASE_DIR/err.txt"
 if [[ -f "$MOCK_DIR/created-heads" ]]; then
   fail "conflito de nome de branch não deveria abrir PR"
 fi
+
+new_case "quatro repos novos respeitam o limite horário"
+write_repos '[
+  {"nameWithOwner":"acme/a","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/b","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/c","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/d","defaultBranchRef":{"name":"main"}}
+]'
+bash "$SCRIPT" >"$CASE_DIR/out.txt"
+assert_log_safe "$MOCK_LOG"
+[[ "$(wc -l <"$MOCK_DIR/created-heads" | tr -d ' ')" == "2" ]]
+grep -q "prHourlyLimit" "$CASE_DIR/out.txt"
+if grep -q "branch=main" "$MOCK_LOG"; then
+  fail "limite horário ainda escreveu na branch padrão"
+fi
+
+new_case "três PRs abertos bloqueiam outro"
+write_repos '[
+  {"nameWithOwner":"acme/new","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/o1","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/o2","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/o3","defaultBranchRef":{"name":"main"}}
+]'
+for slug in o1 o2 o3; do
+  touch "$MOCK_DIR/open_acme_$slug" "$MOCK_DIR/branch_acme_$slug"
+  write_file_on "acme/$slug" "chore-renovate-central-config" "$desired"
+done
+bash "$SCRIPT" >"$CASE_DIR/out.txt"
+assert_log_safe "$MOCK_LOG"
+grep -q "prConcurrentLimit" "$CASE_DIR/out.txt"
+if [[ -f "$MOCK_DIR/created-heads" || -f "$MOCK_DIR/branch_acme_new" ]]; then
+  fail "prConcurrentLimit não segurou o PR novo"
+fi
+
+new_case "três branches bloqueiam a quarta"
+write_repos '[
+  {"nameWithOwner":"acme/extra","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/b1","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/b2","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/b3","defaultBranchRef":{"name":"main"}}
+]'
+for slug in b1 b2 b3; do
+  touch "$MOCK_DIR/branch_acme_$slug"
+  write_file_on "acme/$slug" "chore-renovate-central-config" "$desired"
+done
+bash "$SCRIPT" >"$CASE_DIR/out.txt"
+assert_log_safe "$MOCK_LOG"
+grep -q "branchConcurrentLimit" "$CASE_DIR/out.txt"
+[[ "$(wc -l <"$MOCK_DIR/created-heads" | tr -d ' ')" == "2" ]]
+if [[ -f "$MOCK_DIR/branch_acme_extra" ]]; then
+  fail "branchConcurrentLimit criou a quarta branch"
+fi
+
+new_case "PR desta hora entra no limite horário"
+hour="$(date -u +%Y-%m-%dT%H:00:00Z)"
+write_repos '[
+  {"nameWithOwner":"acme/recent","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/wait1","defaultBranchRef":{"name":"main"}},
+  {"nameWithOwner":"acme/wait2","defaultBranchRef":{"name":"main"}}
+]'
+touch "$MOCK_DIR/open_acme_recent" "$MOCK_DIR/branch_acme_recent"
+printf '%s\n' "$hour" >"$MOCK_DIR/created_acme_recent"
+write_file_on "acme/recent" "chore-renovate-central-config" "$desired"
+bash "$SCRIPT" >"$CASE_DIR/out.txt"
+assert_log_safe "$MOCK_LOG"
+[[ "$(wc -l <"$MOCK_DIR/created-heads" | tr -d ' ')" == "1" ]]
+grep -q "prHourlyLimit" "$CASE_DIR/out.txt"
 
 printf 'testes do script ok\n'
