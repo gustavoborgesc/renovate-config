@@ -1,71 +1,34 @@
-name: Global Repo Maintenance (Renovate & Node 24.x)
+name: Global Repo Maintenance
 
 on:
   schedule:
-    - cron: '0 6 * * 1' # Executa toda segunda-feira às 06:00 UTC
+    - cron: '0 6 * * 1' # segunda-feira, 06:00 UTC
   workflow_dispatch:
+
+# GITHUB_TOKEN só lê este repositório. PAT_GLOBAL fica no step que abre PRs.
+permissions:
+  contents: read
+
+concurrency:
+  group: global-repo-maintenance
+  cancel-in-progress: false
 
 jobs:
   maintain-repos:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - name: Configurar e atualizar todos os repositórios
+      - name: Recusar ref que não seja a branch padrão
+        if: github.ref_name != github.event.repository.default_branch
+        run: |
+          echo "Ref ${GITHUB_REF} não é a branch padrão. PAT_GLOBAL não será usado."
+          exit 1
+
+      - name: Checkout deste repositório
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Abrir PRs com o preset central do Renovate
         env:
           GH_TOKEN: ${{ secrets.PAT_GLOBAL }}
-        run: |
-          set +e # Impede que um erro num repositório trave os restantes
-          
-          gh repo list --limit 100 --no-archived --source --json nameWithOwner,defaultBranchRef --jq '.[] | select(.defaultBranchRef != null) | "\(.nameWithOwner) \(.defaultBranchRef.name)"' | while read -r repo branch; do
-            if [ "$repo" = "gustavoborgesc/renovate-config" ]; then continue; fi
-            echo "========================================="
-            echo "🚀 Processando $repo ($branch)..."
-
-            # 1. Habilita auto-merge no repositório
-            gh api --method PATCH "/repos/$repo" -f allow_auto_merge=true >/dev/null 2>&1
-
-            # 2. Garante o renovate.json apontando para o repositório central
-            RENOVATE_B64=$(printf '{\n  "$schema": "https://docs.renovatebot.com/renovate-schema.json",\n  "extends": ["github>gustavoborgesc/renovate-config"]\n}\n' | base64 -w 0)
-            RENOVATE_SHA=$(gh api "/repos/$repo/contents/renovate.json?ref=$branch" --jq '.sha' 2>/dev/null)
-            
-            if [ -n "$RENOVATE_SHA" ] && [[ "$RENOVATE_SHA" != *"Not Found"* ]]; then
-              gh api --method PUT "/repos/$repo/contents/renovate.json" \
-                -f message="chore: update centralized renovate config" \
-                -f content="$RENOVATE_B64" \
-                -f sha="$RENOVATE_SHA" \
-                -f branch="$branch" >/dev/null 2>&1 && echo "  ✅ renovate.json atualizado"
-            else
-              gh api --method PUT "/repos/$repo/contents/renovate.json" \
-                -f message="chore: add centralized renovate config" \
-                -f content="$RENOVATE_B64" \
-                -f branch="$branch" >/dev/null 2>&1 && echo "  ✅ renovate.json criado"
-            fi
-
-            # 3. Atualiza package.json (se existir e for um ficheiro válido) para Node 24.x
-            PKG_SHA=$(gh api "/repos/$repo/contents/package.json?ref=$branch" --jq '.sha' 2>/dev/null)
-            if [ -n "$PKG_SHA" ] && [[ "$PKG_SHA" != *"Not Found"* ]]; then
-              PKG_CONTENT=$(gh api "/repos/$repo/contents/package.json?ref=$branch" --jq '.content' 2>/dev/null | base64 -di)
-              
-              if echo "$PKG_CONTENT" | jq -e . >/dev/null 2>&1; then
-                CURRENT_NODE=$(echo "$PKG_CONTENT" | jq -r '.engines.node // empty')
-                if [ "$CURRENT_NODE" != "24.x" ]; then
-                  NEW_PKG_B64=$(echo "$PKG_CONTENT" | jq '.engines = (.engines // {}) | .engines.node = "24.x"' | base64 -w 0)
-                  gh api --method PUT "/repos/$repo/contents/package.json" \
-                    -f message="chore: upgrade Node.js engine to 24.x" \
-                    -f content="$NEW_PKG_B64" \
-                    -f sha="$PKG_SHA" \
-                    -f branch="$branch" >/dev/null 2>&1 && echo "  ✅ package.json atualizado para Node 24.x"
-                else
-                  echo "  ⏭️ package.json já está no Node 24.x"
-                fi
-              fi
-            fi
-
-            # 4. Faz merge nos PRs abertos do Renovate E do Dependabot
-            gh pr list --repo "$repo" --state open --json number,title,author --jq '.[] | select(.author.login == "renovate[bot]" or .author.login == "dependabot[bot]" or .title == "Configure Renovate") | .number' 2>/dev/null | while read -r pr_number; do
-              if [ -n "$pr_number" ]; then
-                echo "  🔄 Fazendo merge no PR #$pr_number..."
-                gh pr merge "$pr_number" --repo "$repo" --merge --admin --delete-branch >/dev/null 2>&1 || \
-                gh pr merge "$pr_number" --repo "$repo" --merge --delete-branch >/dev/null 2>&1 || true
-              fi
-            done
-          done
+          SELF_REPO: ${{ github.repository }}
+        run: bash scripts/maintain-repos.sh
