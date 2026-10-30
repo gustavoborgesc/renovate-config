@@ -1,12 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Configuração agressiva: atualiza tudo com auto-merge irrestrito",
+  "description": "Automerge só de patch e de minor estável, e só depois que todos os status checks passarem (incluindo o check da Vercel). Major abre PR para revisão.",
   "extends": [
     "config:recommended",
     ":dependencyDashboard",
     ":semanticCommits",
-    ":automergeAll",
-    ":automergeBranch"
+    ":automergePr",
+    ":automergeRequireAllStatusChecks"
   ],
   "timezone": "America/Sao_Paulo",
   "schedule": ["at any time"],
@@ -14,30 +14,60 @@
   "prConcurrentLimit": 0,
   "branchConcurrentLimit": 0,
   "rangeStrategy": "bump",
+  "automerge": false,
+  "automergeType": "pr",
+  "platformAutomerge": false,
+  "ignoreTests": false,
   "lockFileMaintenance": {
     "enabled": true,
-    "automerge": true,
-    "automergeType": "branch",
-    "ignoreTests": true,
+    "automerge": false,
+    "automergeType": "pr",
+    "platformAutomerge": false,
     "schedule": ["before 5am on Monday"]
   },
   "packageRules": [
     {
-      "description": "Habilita auto-merge irrestrito para qualquer tipo de atualização em todos os pacotes",
+      "description": "Patch, inclusive de pacote 0.x, só entra por PR e só é mergeado quando todos os status checks já passaram. platformAutomerge fica desligado: o auto-merge nativo do GitHub dispara na abertura do PR e só espera check obrigatório da ruleset, então o status da Vercel (muitas vezes não obrigatório) seria ignorado.",
+      "matchUpdateTypes": ["patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false,
+      "ignoreTests": false
+    },
+    {
+      "description": "Minor de pacote estável (1.0.0 ou maior) segue a mesma regra do patch.",
+      "matchUpdateTypes": ["minor"],
+      "matchCurrentVersion": "!/^0/",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false,
+      "ignoreTests": false
+    },
+    {
+      "description": "Minor 0.x pode quebrar, segundo o SemVer. O PR abre e fica para revisão.",
+      "matchUpdateTypes": ["minor"],
+      "matchCurrentVersion": "/^0/",
+      "automerge": false,
+      "automergeType": "pr",
+      "platformAutomerge": false,
+      "ignoreTests": false
+    },
+    {
+      "description": "Major, pin, digest, rollback, bump, replacement e manutenção de lockfile abrem PR e não fazem automerge. Lockfile pode puxar dependência transitiva incompatível mesmo sem mudar o package.json.",
       "matchUpdateTypes": [
         "major",
-        "minor",
-        "patch",
         "pin",
         "pinDigest",
         "digest",
-        "lockFileMaintenance",
         "rollback",
-        "bump"
+        "bump",
+        "replacement",
+        "lockFileMaintenance"
       ],
-      "automerge": true,
-      "automergeType": "branch",
-      "ignoreTests": true
+      "automerge": false,
+      "automergeType": "pr",
+      "platformAutomerge": false,
+      "ignoreTests": false
     }
   ]
 }
